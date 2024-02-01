@@ -134,7 +134,7 @@ def load(filename, start=None, end=None, order=None):
         'frametime': frametime
     }
 
-def save(filename, data, translations=False):
+def save_stream(data, stream, translations=False):
 
     channelmap_inv = {
         'x': 'Xrotation',
@@ -152,45 +152,45 @@ def save(filename, data, translations=False):
     order = data.get('order', 'zyx')
     frametime = data.get('frametime', 1.0/60.0)
     
-    with open(filename, 'w') as f:
+    t = ""
+    stream.write(("%sHIERARCHY\n" % t).encode())
+    stream.write(("%sROOT %s\n" % (t, names[0])).encode())
+    stream.write(("%s{\n" % t).encode())
+    t += '\t'
 
-        t = ""
-        f.write("%sHIERARCHY\n" % t)
-        f.write("%sROOT %s\n" % (t, names[0]))
-        f.write("%s{\n" % t)
-        t += '\t'
+    stream.write(("%sOFFSET %f %f %f\n" % ((t,) + tuple(offsets[0]))).encode())
+    stream.write(("%sCHANNELS 6 Xposition Yposition Zposition %s %s %s \n" % (
+        t, channelmap_inv[order[0]], 
+        channelmap_inv[order[1]], 
+        channelmap_inv[order[2]])).encode())
+    jseq = [0]       
+    for i in range(len(parents)):
+        if parents[i] == 0:
+            t, jseq = save_joint_stream(stream, offsets, order, parents, names, t, i, jseq, translations=translations)
 
-        f.write("%sOFFSET %f %f %f\n" % ((t,) + tuple(offsets[0])))
-        f.write("%sCHANNELS 6 Xposition Yposition Zposition %s %s %s \n" % 
-            (t, channelmap_inv[order[0]], 
-                channelmap_inv[order[1]], 
-                channelmap_inv[order[2]]))
-        jseq = [0]       
-        for i in range(len(parents)):
-            if parents[i] == 0:
-                t, jseq = save_joint(f, offsets, order, parents, names, t, i, jseq, translations=translations)
-
-        t = t[:-1]
-        f.write("%s}\n" % t)
-        f.write("MOTION\n")
-        f.write("Frames: %i\n" % len(rots))
-        f.write("Frame Time: %f\n" % frametime)
-        
-        for i in range(rots.shape[0]):
-            for j in jseq:
-                
-                if translations or j == 0:
-                    f.write("%f %f %f %f %f %f " % (
-                        poss[i,j,0], poss[i,j,1], poss[i,j,2], 
-                        rots[i,j,0], rots[i,j,1], rots[i,j,2]))
-                
-                else:   
-                    f.write("%f %f %f " % (
-                        rots[i,j,0], rots[i,j,1], rots[i,j,2]))
-
-            f.write("\n")
+    t = t[:-1]
+    stream.write(("%s}\n" % t).encode())
+    stream.write("MOTION\n".encode())
+    stream.write(("Frames: %i\n" % len(rots)).encode())
+    stream.write(("Frame Time: %f\n" % frametime).encode())
     
-def save_joint(f, offsets, order, parents, names, t, i, jseq, translations=False):
+    for i in range(rots.shape[0]):
+        for j in jseq:
+            
+            if translations or j == 0:
+                stream.write(("%f %f %f %f %f %f " % (
+                    poss[i,j,0], poss[i,j,1], poss[i,j,2], 
+                    rots[i,j,0], rots[i,j,1], rots[i,j,2])).encode())
+            
+            else:   
+                stream.write(("%f %f %f " % (
+                    rots[i,j,0], rots[i,j,1], rots[i,j,2])).encode())
+
+        stream.write("\n".encode())
+    
+    return stream
+    
+def save_joint_stream(f, offsets, order, parents, names, t, i, jseq, translations=False):
 
     jseq.append(i)
 
@@ -200,35 +200,35 @@ def save_joint(f, offsets, order, parents, names, t, i, jseq, translations=False
         'z': 'Zrotation',
     }
     
-    f.write("%sJOINT %s\n" % (t, names[i]))
-    f.write("%s{\n" % t)
+    f.write(("%sJOINT %s\n" % (t, names[i])).encode())
+    f.write(("%s{\n" % t).encode())
     t += '\t'
   
-    f.write("%sOFFSET %f %f %f\n" % ((t,) + tuple(offsets[i])))
+    f.write(("%sOFFSET %f %f %f\n" % ((t,) + tuple(offsets[i]))).encode())
     
     if translations:
-        f.write("%sCHANNELS 6 Xposition Yposition Zposition %s %s %s \n" % (t, 
-            channelmap_inv[order[0]], channelmap_inv[order[1]], channelmap_inv[order[2]]))
+        f.write(("%sCHANNELS 6 Xposition Yposition Zposition %s %s %s \n" % (t, 
+            channelmap_inv[order[0]], channelmap_inv[order[1]], channelmap_inv[order[2]])).encode())
     else:
-        f.write("%sCHANNELS 3 %s %s %s\n" % (t, 
-            channelmap_inv[order[0]], channelmap_inv[order[1]], channelmap_inv[order[2]]))
+        f.write(("%sCHANNELS 3 %s %s %s\n" % (t, 
+            channelmap_inv[order[0]], channelmap_inv[order[1]], channelmap_inv[order[2]])).encode())
     
     end_site = True
     
     for j in range(len(parents)):
         if parents[j] == i:
-            t, jseq = save_joint(f, offsets, order, parents, names, t, j, jseq, translations=translations)
+            t, jseq = save_joint_stream(f, offsets, order, parents, names, t, j, jseq, translations=translations)
             end_site = False
     
     if end_site:
-        f.write("%sEnd Site\n" % t)
-        f.write("%s{\n" % t)
+        f.write(("%sEnd Site\n" % t).encode())
+        f.write(("%s{\n" % t).encode())
         t += '\t'
-        f.write("%sOFFSET %f %f %f\n" % (t, 0.0, 0.0, 0.0))
+        f.write(("%sOFFSET %f %f %f\n" % (t, 0.0, 0.0, 0.0)).encode())
         t = t[:-1]
-        f.write("%s}\n" % t)
+        f.write(("%s}\n" % t).encode())
   
     t = t[:-1]
-    f.write("%s}\n" % t)
+    f.write(("%s}\n" % t).encode())
     
     return t, jseq
