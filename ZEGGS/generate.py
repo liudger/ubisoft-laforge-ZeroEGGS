@@ -312,9 +312,16 @@ def generate_gesture(
 
             if first_pose is not None:
                 if isinstance(first_pose, pathlib.WindowsPath) or isinstance(first_pose, pathlib.PosixPath):
+                    print("trying to load first pose from", first_pose)
                     anim_data = bvh.load(first_pose)
                 elif isinstance(first_pose, dict):
+                    print("trying to load first pose from dict")
                     anim_data = first_pose.copy()
+                else:
+                    # read data from path file
+                    anim_data = bvh.load(first_pose)
+                    print("trying to load first pose from", first_pose)
+                    print("this should not be needed")
                 (
                     root_pos,
                     root_rot,
@@ -391,8 +398,8 @@ def generate_gesture(
             if file_name is None:
                 file_name = f"audio_{audio_file.stem}_label_{anim_name}"
             try:
+                animation_data = io.BytesIO()
                 write_bvh(
-                    str(results_path / (file_name + ".bvh")),
                     V_root_pos[0].detach().cpu().numpy(),
                     V_root_rot[0].detach().cpu().numpy(),
                     V_lpos[0].detach().cpu().numpy(),
@@ -403,12 +410,26 @@ def generate_gesture(
                     dt=dt,
                     start_position=np.array([0, 0, 0]),
                     start_rotation=np.array([1, 0, 0, 0]),
+                    stream=animation_data
                 )
-                copyfile(audio_file, str(results_path / (file_name + ".wav")))
+                animation_data.seek(0)
+                data = animation_data.read()
+                # print("data", data)
+                with open('output.bvh', 'wb') as f:
+                    f.write(data)
+                
+                
+                # copyfile(audio_file, str(results_path / (file_name + ".wav")))
+                #  we need to stream the audio file in sync with the bvh file
+                # convert the audio file to bytes and stream it
+                with open(audio_stream, 'rb') as f:
+                    audio_chunk = f.read()
+                audio_chunk = io.BytesIO(audio_chunk)
+                audio_chunk.seek(0)
 
             except (PermissionError, OSError) as e:
                 print(e)
-    return final_style_encoding
+    return final_style_encoding, animation_data, audio_chunk
 
 
 if __name__ == "__main__":
@@ -510,7 +531,7 @@ if __name__ == "__main__":
             console.print(df.iloc[0].to_string(index=True))
             file_name = args.file_name
             style = [(Path(args.style), args.frames)] if style_encoding_type == "example" else [args.style]
-            generate_gesture(
+            result = generate_gesture(
                 audio_file=Path(args.audio),
                 styles=style,
                 network_path=network_path,
