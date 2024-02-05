@@ -2,7 +2,8 @@ import argparse
 import json
 import pathlib
 from pathlib import Path
-from shutil import copyfile
+# from shutil import copyfile
+import io
 
 import numpy as np
 import pandas as pd
@@ -12,15 +13,27 @@ from rich.console import Console
 from anim import bvh
 from anim import quat
 from anim.txform import *
-from audio.audio_files import read_wavfile
+from audio.audio_files import read_audiostream
 from data_pipeline import preprocess_animation
 from data_pipeline import preprocess_audio
 from helpers import split_by_ratio
 from utils import write_bvh
 
+def stream_data(audio_stream, chunk_size=4096):
+    if isinstance(audio_stream, (str, Path)):
+        audio_stream = open(audio_stream, 'rb')
+    
+    audio_data = b""
+    
+    while True:
+        chunk = audio_stream.read(chunk_size)
+        if not chunk:
+            break
+        audio_data += chunk
+        yield audio_data
 
 def generate_gesture(
-        audio_file,
+        audio_stream,
         styles,
         network_path,
         data_path,
@@ -34,7 +47,7 @@ def generate_gesture(
         seed=1234,
         use_gpu=True,
         use_script=False,
-):
+) -> torch.Tensor:
     """Generate stylized gesture from raw audio and style example (ZEGGS)
 
     Args:
@@ -61,7 +74,7 @@ def generate_gesture(
                                        first pose or the animation dictionary extracted by loading a bvh file.
                                        If None, the pose from the last example is used (only used for example-based stylization.
                                        Defaults to None.
-        temperature (float, optional): VAE temprature. This adjusts the amount of stochasticity. Defaults to 1.0.
+        temperature (float, optional): VAE temperature. This adjusts the amount of stochasticity. Defaults to 1.0.
         seed (int, optional): Random seed. Defaults to 1234.
         use_gpu (bool, optional): Use gpu or cpu. Defaults to True.
         use_script (bool, optional): Use torch script. Defaults to False.
@@ -81,7 +94,7 @@ def generate_gesture(
     path_data_pipeline_conf = data_path / "data_pipeline_conf.json"
     if results_path is not None:
         results_path.mkdir(exist_ok=True)
-    assert (audio_file is None) == (results_path is None)
+    assert (audio_stream is None) == (results_path is None)
 
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -153,13 +166,16 @@ def generate_gesture(
     if style_encoding_type == "example":
         network_style_encoder_script.eval()
 
-    with torch.no_grad():
-        # If audio is None we only output the style encodings
-        if audio_file is not None:
-            # Load Audio
+    # get data here?
+    # for data in stream_data(audio_stream):
+        # process data
 
-            _, audio_data = read_wavfile(
-                audio_file,
+    with torch.no_grad():
+       
+        for audio_chunk in stream_data(audio_stream, chunk_size=16384):
+
+            _, audio_chunk = read_audiostream(
+                io.BytesIO(audio_chunk),
                 rescale=True,
                 desired_fs=16000,
                 desired_nb_channels=None,
@@ -167,11 +183,12 @@ def generate_gesture(
                 logger=None,
             )
 
-            n_frames = int(round(60.0 * (len(audio_data) / 16000)))
+            n_frames = int(round(60.0 * (len(audio_chunk) / 16000)))
+            print(f"n_frames: {n_frames}")
 
             audio_features = torch.as_tensor(
                 preprocess_audio(
-                    audio_data,
+                    audio_chunk,
                     60,
                     n_frames,
                     data_pipeline_conf.audio_conf,
@@ -196,11 +213,11 @@ def generate_gesture(
                     # Trimming if start/end frames are given
                     if style[1] is not None:
                         anim_data["rotations"] = anim_data["rotations"][
-                                                 style[1][0]: style[1][1]
-                                                 ]
+                                                style[1][0]: style[1][1]
+                                                ]
                         anim_data["positions"] = anim_data["positions"][
-                                                 style[1][0]: style[1][1]
-                                                 ]
+                                                style[1][0]: style[1][1]
+                                                ]
                     anim_fps = int(np.ceil(1 / anim_data["frametime"]))
                     assert anim_fps == 60
 
@@ -269,17 +286,20 @@ def generate_gesture(
                     style_encodings.append(style_embeddding)
             elif style_encoding_type == "label":
                 # get the index of style in label names
+                anim_name = style
                 style_index = label_names.index(style)
                 style_embeddding = torch.zeros((1, nlabels), dtype=torch.float32, device=device)
                 style_embeddding[0, style_index] = 1.0
                 style_encodings.append(style_embeddding)
                 assert first_pose is not None
+                # get the first pose string value
+                print("trying to load first pose from", first_pose)
             else:
                 raise ValueError("Unknown style encoding type")
 
         if blend_type == "stitch":
             if len(style_encodings) > 1:
-                if audio_file is None:
+                if audio_stream is None:
                     final_style_encoding = style_encodings
                 else:
                     assert len(styles) == len(blend_ratio)
@@ -307,7 +327,7 @@ def generate_gesture(
             else:
                 final_style_encoding = style_encodings[0]
 
-        if audio_file is not None:
+        if audio_stream is not None:
             se = np.array_split(np.arange(n_frames), len(style_encodings))
 
             if first_pose is not None:
@@ -396,7 +416,7 @@ def generate_gesture(
             V_lrot = quat.from_xform(xform_orthogonalize_from_xy(V_ltxy).detach().cpu().numpy())
 
             if file_name is None:
-                file_name = f"audio_{audio_file.stem}_label_{anim_name}"
+                file_name = f"audio_{audio_stream.stem}_label_{anim_name}"
             try:
                 animation_data = io.BytesIO()
                 write_bvh(
@@ -512,7 +532,7 @@ if __name__ == "__main__":
                 style = [(base_path / Path(row["style"]), frames)] if style_encoding_type == "example" else [
                     row["style"]]
                 generate_gesture(
-                    audio_file=base_path / Path(row["audio"]),
+                    audio_stream=base_path / Path(row["audio"]),
                     styles=style,
                     network_path=network_path,
                     data_path=data_path,
@@ -532,7 +552,7 @@ if __name__ == "__main__":
             file_name = args.file_name
             style = [(Path(args.style), args.frames)] if style_encoding_type == "example" else [args.style]
             result = generate_gesture(
-                audio_file=Path(args.audio),
+                audio_stream=Path(args.audio),
                 styles=style,
                 network_path=network_path,
                 data_path=data_path,

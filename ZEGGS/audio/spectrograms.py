@@ -228,6 +228,8 @@ def extract_spectrogram(x, n_fft, step_size, real_amplitude=True, centered=True)
     """
     # create the sampling window
     window = sps.hann(n_fft)
+    # print shape of window
+    print(f"Window shape: {window.shape}")
 
     # check input signal has a length superior or equal to n_fft
     if len(x) < n_fft:
@@ -248,9 +250,20 @@ def extract_spectrogram(x, n_fft, step_size, real_amplitude=True, centered=True)
     amp = np.zeros((n_fft // 2 + 1, time_axis))
     phase = np.zeros((n_fft // 2 + 1, time_axis))
 
+    # Log window size and other parameters
+    print(f"Window size: {n_fft}")
+    print(f"Step size: {step_size}")
+    print(f"Real amplitude: {real_amplitude}")
+    print(f"Centered: {centered}")
+    print(f"Time axis: {time_axis}")
+
     for i in range(time_axis):
         # get slice of data
         win_data = x[i * step_size: i * step_size + n_fft]
+        print(f"x shape: {x.shape}")
+        # print shape of window
+        print(f"Win data shape: {win_data.shape}")
+        # print shape of 
 
         # apply windowing
         win_data = np.multiply(win_data, window)

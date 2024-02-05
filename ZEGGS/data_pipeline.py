@@ -11,7 +11,7 @@ from scipy import interpolate
 from scipy.interpolate import griddata
 
 from anim import bvh, quat
-from audio.audio_files import read_wavfile, write_wavefile
+from audio.audio_files import read_audiostream, write_wavefile
 from audio.spectrograms import extract_mel_spectrogram_for_tts
 
 FILE_ROOT = os.path.dirname(os.path.realpath(__file__))
@@ -30,19 +30,19 @@ def extract_energy(mel_spec):
     return energy
 
 
-def preprocess_audio(audio_data, anim_fs, anim_length, params, feature_type):
+def preprocess_audio(audio_chunk, anim_fs, anim_length, params, feature_type):
     if params.normalize_loudness:
         import pyloudnorm as pyln
-        meter = pyln.Meter(params.sampling_rate)  # create BS.1770 meter
-        loudness = meter.integrated_loudness(audio_data)
+        meter = pyln.Meter(params.sampling_rate, block_size=0.25)  # create BS.1770 meter
+        loudness = meter.integrated_loudness(audio_chunk)
         # loudness normalize audio to -20 dB LUFS
-        audio_data = pyln.normalize.loudness(audio_data, loudness, -20.0)
+        audio_chunk = pyln.normalize.loudness(audio_chunk, loudness, -20.0)
 
     resample_method = params.resample_method
     audio_feature = []
     # Extract MEL spectrogram
     mel_spec = extract_mel_spectrogram_for_tts(
-        wav_signal=audio_data,
+        wav_signal=audio_chunk,
         fs=params.sampling_rate,
         n_fft=params.filter_length,
         step_size=params.hop_length,
@@ -294,7 +294,7 @@ def data_pipeline(conf):
         assert anim_fps == 60
 
         # Load Audio #
-        audio_sr, original_audio_data = read_wavfile(
+        audio_sr, original_audio_data = read_audiostream(
             audio_file,
             rescale=True,
             desired_fs=audio_desired_fs,

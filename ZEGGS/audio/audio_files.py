@@ -1,8 +1,16 @@
+import io
 import os
+from typing import Tuple
 
 import numpy as np
+
 import sox
 from scipy.io import wavfile
+import soundfile as sf
+from pydub import AudioSegment
+
+import librosa
+
 
 from .logs import get_logger_from_arg
 
@@ -84,6 +92,23 @@ def reformat_and_trim_wav_file(wav_file, fs, bit_depth, nb_channels, overwrite=T
         os.remove(initial_path)
         os.rename(out_path, initial_path)
 
+def convert_audio_stream(input_stream, input_format, output_sample_rate, desired_nb_channels, desired_bit_depth):
+    # Load the audio stream using pydub
+    audio = AudioSegment.from_file(input_stream, format=input_format)
+
+    # Resample the audio
+    audio = audio.set_frame_rate(output_sample_rate)
+
+    # Set the number of channels
+    audio = audio.set_channels(desired_nb_channels)
+
+    # Set the bit depth
+    audio = audio.set_sample_width(desired_bit_depth // 8)
+
+    # Export the result to bytes
+    output_stream = audio.raw_data
+
+    return output_stream
 
 def read_wavfile(file_path, rescale=False, desired_fs=None, desired_nb_channels=None, out_type='float32', logger=None):
     """ Read a WAV file and return the samples in a float32 numpy array
@@ -162,6 +187,61 @@ def read_wavfile(file_path, rescale=False, desired_fs=None, desired_nb_channels=
 
     return fs, x
 
+def read_audiostream(
+    audio_data: io.BytesIO, 
+    rescale: bool = False, 
+    desired_fs: int = None, 
+    desired_nb_channels: int = None, 
+    out_type: str = 'float32', 
+    logger = None
+) -> Tuple[int, np.ndarray]:
+    """ Read a audio stream and return the samples in a float32 numpy array
+
+    :param file_path:               path to the file to read
+    :param rescale:                 rescale the file to get amplitudes in the range between -1 and +1
+                                    only the range is rescaled, not the amplitude
+    :param desired_fs:              frequency expected from the WAV file
+                                    if not specified, the original WAV file sampling frequency is used
+    :param desired_nb_channels:     number of channels expected from the WAV file
+                                    if not specified, the original WAV number of channels is used
+    :param out_type:            desired output type of the audio waveform
+    :param logger:                  arg to create logger object
+
+    :return: sampling frequency and samples
+    """
+    # create logger object
+    logger = get_logger_from_arg(logger)
+
+    # check arguments make sense
+    assert ('int' in out_type or 'float' in out_type), \
+        logger.error(f'Inconsistent argument: only output of type "int" or "float" are supported, not "{out_type}"')
+    if rescale:
+        assert ('float' in out_type), logger.error(f'Inconsistent arguments: cannot rescale if out_type={out_type}')
+
+    # Read the audio data from the stream
+    data, sample_rate = sf.read(audio_data)
+
+    # If the sample rate is not the desired sample rate, resample the data
+    if desired_fs and sample_rate != desired_fs:
+        data = librosa.resample(data, orig_sr=sample_rate, target_sr=desired_fs)
+        sample_rate = desired_fs
+
+    # If the data has more than the desired number of channels, convert it to mono
+    if desired_nb_channels and data.shape[1] > desired_nb_channels:
+        data = np.mean(data, axis=1)
+
+    # If the data is not the desired bit depth, convert it
+    if 'int' in out_type:
+        desired_bit_depth = int(out_type.replace('int', ''))
+        if data.dtype != np.dtype('int' + str(desired_bit_depth)):
+            data = data.astype('int' + str(desired_bit_depth))
+    elif 'float' in out_type:
+        if data.dtype != np.float32:
+            data = data.astype(np.float32)
+
+    return sample_rate, data
+
+
 
 def write_wavefile(fileName, pcmData, sampling_rate, out_type='int16'):
     """ write a WAV file from a numpy array
@@ -206,7 +286,6 @@ def rescale_wav_array(x, desired_dtype='float32'):
     y = _rescale_wav_to_float32(x)
     z = _rescale_wav_from_float32(y, desired_dtype)
     return z
-
 
 def _rescale_wav_to_float32(x):
     """ Rescale WAV array between -1.f and 1.f based on the current format
