@@ -48,14 +48,10 @@ dist/**
 data/clean
 data/original
 data/processed_v1/processed_data.npz
+test_data/
 
 .vscode
 .idea
 .ipynb_checkpoints
 *.bvh
 *.wav
-data/archive
-data/archive.zip
-data/MELD.Raw
-data/MELD.Raw.tar.gz
-data/test_sounds
