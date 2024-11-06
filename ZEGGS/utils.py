@@ -54,6 +54,8 @@ def write_bvh(
         order,
         dt,
         stream,
+        header_only=False,  # New parameter
+        frames_only=False,
         start_position=None,
         start_rotation=None,
 ):

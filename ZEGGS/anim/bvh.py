@@ -1,3 +1,4 @@
+import io
 import re
 import numpy as np
 
@@ -134,7 +135,20 @@ def load(filename, start=None, end=None, order=None):
         'frametime': frametime
     }
 
-def save_stream(data, stream, translations=False):
+def save_bvh_to_file(stream: io.BytesIO, filename: str):
+    with open(filename, 'wb') as f:
+        f.write(stream.getvalue())
+
+def save_stream(data, stream, translations=False, header_only=False, frames_only=False):
+    """Save BVH data to a stream with options for partial writing
+    
+    Args:
+        data: Dictionary containing animation data
+        stream: BytesIO or file stream to write to
+        translations: Whether to include translations
+        header_only: Only write the hierarchy section
+        frames_only: Only write the motion frames
+    """
 
     channelmap_inv = {
         'x': 'Xrotation',
@@ -152,41 +166,47 @@ def save_stream(data, stream, translations=False):
     order = data.get('order', 'zyx')
     frametime = data.get('frametime', 1.0/60.0)
     
-    t = ""
-    stream.write(("%sHIERARCHY\n" % t).encode())
-    stream.write(("%sROOT %s\n" % (t, names[0])).encode())
-    stream.write(("%s{\n" % t).encode())
-    t += '\t'
+    if not frames_only:
+        # Write hierarchy section
+        t = ""
+        stream.write(("%sHIERARCHY\n" % t).encode())
+        stream.write(("%sROOT %s\n" % (t, names[0])).encode())
+        stream.write(("%s{\n" % t).encode())
+        t += '\t'
 
-    stream.write(("%sOFFSET %f %f %f\n" % ((t,) + tuple(offsets[0]))).encode())
-    stream.write(("%sCHANNELS 6 Xposition Yposition Zposition %s %s %s \n" % (
-        t, channelmap_inv[order[0]], 
-        channelmap_inv[order[1]], 
-        channelmap_inv[order[2]])).encode())
-    jseq = [0]       
-    for i in range(len(parents)):
-        if parents[i] == 0:
-            t, jseq = save_joint_stream(stream, offsets, order, parents, names, t, i, jseq, translations=translations)
+        stream.write(("%sOFFSET %f %f %f\n" % ((t,) + tuple(offsets[0]))).encode())
+        stream.write(("%sCHANNELS 6 Xposition Yposition Zposition %s %s %s \n" % (
+            t, channelmap_inv[order[0]], 
+            channelmap_inv[order[1]], 
+            channelmap_inv[order[2]])).encode())
+        jseq = [0]       
+        for i in range(len(parents)):
+            if parents[i] == 0:
+                t, jseq = save_joint_stream(stream, offsets, order, parents, names, t, i, jseq, translations=translations)
 
-    t = t[:-1]
-    stream.write(("%s}\n" % t).encode())
-    stream.write("MOTION\n".encode())
-    stream.write(("Frames: %i\n" % len(rots)).encode())
-    stream.write(("Frame Time: %f\n" % frametime).encode())
+        t = t[:-1]
+        stream.write(("%s}\n" % t).encode())
+        stream.write("MOTION\n".encode())
+        stream.write(("Frames: %i\n" % len(rots)).encode())
+        stream.write(("Frame Time: %f\n" % frametime).encode())
+    if not header_only:
+        # Write frame data
+        for i in range(rots.shape[0]):
+            for j in jseq:
+                
+                if translations or j == 0:
+                    stream.write(("%f %f %f %f %f %f " % (
+                        poss[i,j,0], poss[i,j,1], poss[i,j,2], 
+                        rots[i,j,0], rots[i,j,1], rots[i,j,2])).encode())
+                
+                else:   
+                    stream.write(("%f %f %f " % (
+                        rots[i,j,0], rots[i,j,1], rots[i,j,2])).encode())
+
+            stream.write("\n".encode())
     
-    for i in range(rots.shape[0]):
-        for j in jseq:
-            
-            if translations or j == 0:
-                stream.write(("%f %f %f %f %f %f " % (
-                    poss[i,j,0], poss[i,j,1], poss[i,j,2], 
-                    rots[i,j,0], rots[i,j,1], rots[i,j,2])).encode())
-            
-            else:   
-                stream.write(("%f %f %f " % (
-                    rots[i,j,0], rots[i,j,1], rots[i,j,2])).encode())
-
-        stream.write("\n".encode())
+    # save stream to file on disk
+    save_bvh_to_file(stream, 'output.bvh')
     
     return stream
     
@@ -232,3 +252,19 @@ def save_joint_stream(f, offsets, order, parents, names, t, i, jseq, translation
     f.write(("%s}\n" % t).encode())
     
     return t, jseq
+
+def save_frame_stream(data, stream, jseq, translations=False):
+    """Helper function to write just a single frame of animation data"""
+    rots, poss = data['rotations'], data['positions']
+    
+    for j in jseq:
+        if translations or j == 0:
+            stream.write(("%f %f %f %f %f %f " % (
+                poss[0,j,0], poss[0,j,1], poss[0,j,2], 
+                rots[0,j,0], rots[0,j,1], rots[0,j,2])).encode())
+        else:   
+            stream.write(("%f %f %f " % (
+                rots[0,j,0], rots[0,j,1], rots[0,j,2])).encode())
+
+    stream.write("\n".encode())
+    return stream

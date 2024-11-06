@@ -1,0 +1,12 @@
+{
+  "timestamp": "20241105_153430",
+  "reason": "interval",
+  "total_chunks": 1,
+  "total_samples": 293504,
+  "duration": 6.1146666666666665,
+  "max_amplitude": 0.93603515625,
+  "min_amplitude": -0.93603515625,
+  "rms": 0.19792914390563965,
+  "sample_rate": 48000,
+  "pcm_max": 30671.0
+}

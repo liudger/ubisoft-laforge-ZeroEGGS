@@ -1,8 +1,9 @@
 import argparse
+import io
 import json
 import pathlib
 from pathlib import Path
-from shutil import copyfile
+from typing import List
 
 import numpy as np
 import pandas as pd
@@ -11,17 +12,20 @@ from rich.console import Console
 
 from anim import bvh
 from anim import quat
-from anim.txform import *
-from audio.audio_files import read_wavfile
+from anim.txform import xform_orthogonalize_from_xy
 from data_pipeline import preprocess_animation
 from data_pipeline import preprocess_audio
 from helpers import split_by_ratio
 from utils import write_bvh
+import torch
 
+import logging
+
+from .audio_processor import AudioProcessor
 
 def generate_gesture(
         audio_file,
-        styles,
+        styles: List[any],
         network_path,
         data_path,
         results_path,
@@ -34,11 +38,12 @@ def generate_gesture(
         seed=1234,
         use_gpu=True,
         use_script=False,
+        send_header=False,
 ):
     """Generate stylized gesture from raw audio and style example (ZEGGS)
 
     Args:
-        audio_file ([type]): Path to audio file. If None the function does not generate geture and only outputs the style embedding
+        audio_file ([type]): Path to audio file. If None the function does not generate gesture and only outputs the style embedding
         styles ([type]): What styles to use.
         Multiple styles are given for blending or stitching styles.
             Style Encoding Type == "example":
@@ -61,7 +66,7 @@ def generate_gesture(
                                        first pose or the animation dictionary extracted by loading a bvh file.
                                        If None, the pose from the last example is used (only used for example-based stylization.
                                        Defaults to None.
-        temperature (float, optional): VAE temprature. This adjusts the amount of stochasticity. Defaults to 1.0.
+        temperature (float, optional): VAE temperature. This adjusts the amount of stochasticity. Defaults to 1.0.
         seed (int, optional): Random seed. Defaults to 1234.
         use_gpu (bool, optional): Use gpu or cpu. Defaults to True.
         use_script (bool, optional): Use torch script. Defaults to False.
@@ -70,6 +75,15 @@ def generate_gesture(
         final_style_encoding: The final style embedding. If blend_type is "stitch", it is the style embedding for each frame.
                               If blend_type is "add", it is the interpolated style embedding vector
     """
+
+    logging.basicConfig(level=logging.DEBUG)
+    logging.info('Start of generate_gesture function')
+
+    # get current path
+    current_path = Path.cwd()
+    logging.info('Current path: %s', current_path)
+
+    logging.info('style from styles: %s', styles)
 
     # Load details
     path_network_speech_encoder_weights = network_path / "speech_encoder.pt"
@@ -80,7 +94,7 @@ def generate_gesture(
     path_data_definition = data_path / "data_definition.json"
     path_data_pipeline_conf = data_path / "data_pipeline_conf.json"
     if results_path is not None:
-        results_path.mkdir(exist_ok=True)
+        results_path.mkdir(parents=True, exist_ok=True)
     assert (audio_file is None) == (results_path is None)
 
     np.random.seed(seed)
@@ -156,36 +170,46 @@ def generate_gesture(
     with torch.no_grad():
         # If audio is None we only output the style encodings
         if audio_file is not None:
-            # Load Audio
-
-            _, audio_data = read_wavfile(
-                audio_file,
-                rescale=True,
-                desired_fs=16000,
-                desired_nb_channels=None,
-                out_type="float32",
-                logger=None,
-            )
-
-            n_frames = int(round(60.0 * (len(audio_data) / 16000)))
-
-            audio_features = torch.as_tensor(
-                preprocess_audio(
-                    audio_data,
-                    60,
-                    n_frames,
-                    data_pipeline_conf.audio_conf,
-                    feature_type=data_pipeline_conf.audio_feature_type,
-                ),
-                device=device,
-                dtype=torch.float32,
-            )
-            speech_encoding = network_speech_encoder_script(
-                (audio_features[np.newaxis] - audio_input_mean) / audio_input_std
-            )
+            try:
+                # Initialize audio processor
+                logging.debug("Initializing audio processor")
+                audio_processor = AudioProcessor(data_pipeline_conf)
+                
+                # Load and prepare audio
+                logging.debug("Loading audio data")
+                audio_data, _ = audio_processor.load_audio(audio_file)
+                logging.debug(f"Loaded audio data: {len(audio_data)} samples")
+                
+                # Use data pipeline for feature extraction
+                logging.debug("Processing audio features")
+                n_frames = int(round(60.0 * (len(audio_data) / 16000)))
+                logging.debug(f"Number of frames: {n_frames}")
+                audio_features = torch.as_tensor(
+                    preprocess_audio(
+                        audio_data,
+                        60,
+                        n_frames,
+                        data_pipeline_conf.audio_conf,
+                        feature_type=data_pipeline_conf.audio_feature_type,
+                    ),
+                    device=device,
+                    dtype=torch.float32,
+                )
+                speech_encoding = network_speech_encoder_script(
+                    (audio_features[np.newaxis] - audio_input_mean) / audio_input_std
+                )
+                
+                # Continue with gesture generation...
+                
+            except Exception as e:
+                logging.error(f"Error in generate_gesture: {e}")
+                raise
 
         # Style Encoding
         style_encodings = []
+
+        # print the type of styles and all within styles
+        logging.info('type of styles: %s', type(styles))
 
         for style in styles:
             if style_encoding_type == "example":
@@ -268,7 +292,9 @@ def generate_gesture(
                     )[np.newaxis]
                     style_encodings.append(style_embeddding)
             elif style_encoding_type == "label":
+                logging.info('using label style encoding')
                 # get the index of style in label names
+                anim_name = style
                 style_index = label_names.index(style)
                 style_embeddding = torch.zeros((1, nlabels), dtype=torch.float32, device=device)
                 style_embeddding[0, style_index] = 1.0
@@ -298,6 +324,7 @@ def generate_gesture(
                 final_style_encoding = style_encodings[0]
         elif blend_type == "add":
             # style_encoding = torch.mean(torch.stack(style_encodings), dim=0)
+            logging.info('using add blend type')
             if len(style_encodings) > 1:
                 assert len(style_encodings) == len(blend_ratio)
                 final_style_encoding = torch.matmul(
@@ -311,6 +338,7 @@ def generate_gesture(
             se = np.array_split(np.arange(n_frames), len(style_encodings))
 
             if first_pose is not None:
+                
                 if isinstance(first_pose, pathlib.WindowsPath) or isinstance(first_pose, pathlib.PosixPath):
                     print("trying to load first pose from", first_pose)
                     anim_data = bvh.load(first_pose)
@@ -319,9 +347,9 @@ def generate_gesture(
                     anim_data = first_pose.copy()
                 else:
                     # read data from path file
-                    anim_data = bvh.load(first_pose)
                     print("trying to load first pose from", first_pose)
                     print("this should not be needed")
+                    anim_data = bvh.load(first_pose)
                 (
                     root_pos,
                     root_rot,
@@ -395,42 +423,105 @@ def generate_gesture(
 
             V_lrot = quat.from_xform(xform_orthogonalize_from_xy(V_ltxy).detach().cpu().numpy())
 
-            if file_name is None:
-                file_name = f"audio_{audio_file.stem}_label_{anim_name}"
+            # if file_name is None:
+            #     file_name = f"audio_{audio_file.stem}_label_{anim_name}"
+            if isinstance(audio_file, io.BytesIO):
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                file_name = f"audio_stream_{timestamp}_label_{anim_name}"
+            else:
+                # Original behavior for Path objects
+                file_name = f"audio_{Path(audio_file).stem}_label_{anim_name}"
+
+
             try:
+                logging.info('Start of writing bvh data')
                 animation_data = io.BytesIO()
-                write_bvh(
-                    V_root_pos[0].detach().cpu().numpy(),
-                    V_root_rot[0].detach().cpu().numpy(),
-                    V_lpos[0].detach().cpu().numpy(),
-                    V_lrot[0],
-                    parents=parents.detach().cpu().numpy(),
-                    names=bone_names,
-                    order="zyx",
-                    dt=dt,
-                    start_position=np.array([0, 0, 0]),
-                    start_rotation=np.array([1, 0, 0, 0]),
-                    stream=animation_data
-                )
-                animation_data.seek(0)
-                data = animation_data.read()
-                # print("data", data)
-                with open('output.bvh', 'wb') as f:
-                    f.write(data)
+
+                if send_header:
+                    # Write only the header
+                    write_bvh(
+                        V_root_pos[0:1].detach().cpu().numpy(),  # Just first frame
+                        V_root_rot[0:1].detach().cpu().numpy(),
+                        V_lpos[0:1].detach().cpu().numpy(),
+                        V_lrot[0:1],
+                        parents=parents.detach().cpu().numpy(),
+                        names=bone_names,
+                        order="zyx",
+                        dt=dt,
+                        stream=animation_data,
+                        header_only=True  # Only write header
+                    )
+
+                else:
+                    # Write only frame data
+                    write_bvh(
+                        V_root_pos.detach().cpu().numpy(),
+                        V_root_rot.detach().cpu().numpy(),
+                        V_lpos.detach().cpu().numpy(),
+                        V_lrot,
+                        parents=parents.detach().cpu().numpy(),
+                        names=bone_names,
+                        order="zyx",
+                        dt=dt,
+                        stream=animation_data,
+                        frames_only=True  # Only write frames
+                    )
+                
+                # write_bvh(
+                #     V_root_pos[0].detach().cpu().numpy(),
+                #     V_root_rot[0].detach().cpu().numpy(),
+                #     V_lpos[0].detach().cpu().numpy(),
+                #     V_lrot[0],
+                #     parents=parents.detach().cpu().numpy(),
+                #     names=bone_names,
+                #     order="zyx",
+                #     dt=dt,
+                #     start_position=np.array([0, 0, 0]),
+                #     start_rotation=np.array([1, 0, 0, 0]),
+                #     stream=animation_data
+                # )
+
+                def generate():
+                    logging.info('Start of generate function')
+                    # Stream the animation data
+                    logging.debug(f"Returning animation data, size: {len(animation_data.getvalue())} bytes")
+                    animation_data.seek(0)
+                    yield from animation_data
+
+                    # Stream the audio data
+                    # with open(audio_file, 'rb') as f:
+                    #     audio_chunk = f.read()
+                    # audio_chunk = io.BytesIO(audio_chunk)
+                    # audio_chunk.seek(0)
+                    # yield from audio_chunk
+
+                # animation_data.seek(0)
+                # data = animation_data.read()
+                # # print("data", data)
+                # with open('output.bvh', 'wb') as f:
+                #     f.write(data)
                 
                 
                 # copyfile(audio_file, str(results_path / (file_name + ".wav")))
                 #  we need to stream the audio file in sync with the bvh file
                 # convert the audio file to bytes and stream it
-                with open(audio_stream, 'rb') as f:
-                    audio_chunk = f.read()
-                audio_chunk = io.BytesIO(audio_chunk)
-                audio_chunk.seek(0)
+                # with open(audio_file, 'rb') as f:
+                #     audio_chunk = f.read()
+                # audio_chunk = io.BytesIO(audio_chunk)
+                # audio_chunk.seek(0)
 
             except (PermissionError, OSError) as e:
-                print(e)
-    return final_style_encoding, animation_data, audio_chunk
+                logging.error(f"Error in generate_gesture: {e}")
+                raise
+    # return final_style_encoding, animation_data, audio_chunk
+    return generate()
 
+def is_wav(file_path):
+    with open(file_path, 'rb') as stream:
+        header = stream.read(4)
+    # 'RIFF' and 'RIFX' are the only two possible values for a wav file
+    return header == b'RIFF' or header == b'RIFX'
 
 if __name__ == "__main__":
 
@@ -475,24 +566,62 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    with open(args.options, "r") as f:
-        options = json.load(f)
+    # get current path
+    current_path = Path.cwd()
+    console.print("Current path:", current_path)
+    
+    # check for 'data' directory in current path and parent path
+    data_dir = None
+    if (current_path / 'data').exists():
+        data_dir = current_path / 'data'
+    elif (current_path.parent / 'data').exists():
+        data_dir = current_path.parent / 'data'
+
+    if data_dir is None:
+        console.print("Error: 'data' directory not found")
+    else:
+        # construct the path to the options file
+        options_file = data_dir / Path(args.options).relative_to('../data')
+        if not options_file.exists():
+            console.print(f"Error: 'options.json' not found in {data_dir}")
+        else:
+            with open(options_file, "r") as f:
+                options = json.load(f)
+    
+    
+    # with open(args.options, "r") as f:
+    #     options = json.load(f)
 
     train_options = options["train_opt"]
     network_options = options["net_opt"]
     paths = options["paths"]
-
     base_path = Path(paths["base_path"])
+    # base_path should be the same as data_dir if not override base_path with data_dir
+    if data_dir != base_path:
+        base_path = data_dir
     data_path = base_path / paths["path_processed_data"]
 
+    # check if the network path exists otherwise reconstruct it with the data_dir
+    # use the relative to >> '../data' to get the relative path from the data directory
     network_path = Path(paths["models_dir"])
+    if not network_path.exists():
+        network_path = data_dir / Path(paths["models_dir"]).relative_to('../data')
+        if not network_path.exists():
+            console.print(f"Error: 'models' directory not found in {data_dir}")
     output_path = Path(paths["output_dir"])
+    if not output_path.exists():
+        output_path = data_dir / Path(paths["output_dir"]).relative_to('../data')
+        if not output_path.exists():
+            console.print(f"Error: 'output' directory not found in {data_dir}")
 
     results_path = args.results_path
     if results_path is None:
         results_path = Path(output_path) / "results"
 
     style_encoding_type = args.style_encoding_type
+
+    # print style
+    console.print("Style:", args.style)
 
     if args.csv is not None:
         console.print("Getting arguments from CSV file")

@@ -32,6 +32,7 @@ def reformat_and_trim_wav_file(wav_file, fs, bit_depth, nb_channels, overwrite=T
 
     # normalize and strip path
     initial_path = os.path.normpath(wav_file).strip()
+    logger.info(f'Processing {initial_path}')
 
     if overwrite:
         # create a temporary filename
@@ -113,6 +114,18 @@ def read_wavfile(file_path, rescale=False, desired_fs=None, desired_nb_channels=
     file_path = os.path.normpath(file_path).strip()
 
     try:
+        # check format is wav convert to wav if not
+        if not file_path.endswith('.wav'):
+            # get extension
+            ext = os.path.splitext(file_path)[1]
+            logger.info(f'Converting {file_path} to WAV, current format is {ext}')
+            # use pydub to convert the file to wav
+            from pydub import AudioSegment
+            sound = AudioSegment.from_file(file_path)
+            file_path = file_path.replace(ext, 'wav')
+            sound.export(file_path, format='wav')
+
+
         # try to read the wav file
         fs, x = wavfile.read(file_path)
 
